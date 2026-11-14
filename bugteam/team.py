@@ -62,15 +62,39 @@ class TeamState(TypedDict):
 def triage(state: TeamState) -> dict:
     """Label every issue, one structured-output call per issue."""
     # TODO 2.1
-    # your code here
-    raise NotImplementedError
+    model = config.chat().with_structured_output(Label)
+
+    # the library's code: "# <path>" then the file's text, for each huskyutils file
+    parts = []
+    for path, text in repo_files().items():
+        if path.startswith("huskyutils/"):
+            parts.append("# " + path + "\n" + text)
+    code = "\n\n".join(parts)
+
+    labels = {}
+    reasons = {}
+    for issue in state["issues"]:
+        prompt = TRIAGE_PROMPT.format(code=code, issue=issue_text(issue))
+        result = retry(model.invoke, prompt)
+        labels[issue["number"]] = result.label
+        reasons[issue["number"]] = result.reasoning
+
+    return {"labels": labels, "reasons": reasons}
 
 
 def fan_out(state: TeamState):
     """One Send per issue triage labeled a bug, or straight to the report if there are none."""
     # TODO 2.2
-    # your code here
-    raise NotImplementedError
+    sends = []
+    for issue in state["issues"]:
+        number = issue["number"]
+        if state["labels"][number] == "bug":
+            note = state["reasons"][number]
+            sends.append(Send("fix", {"issue": issue, "note": note}))
+
+    if len(sends) == 0:
+        return "report"
+    return sends
 
 
 def fix(job: dict) -> dict:
@@ -105,8 +129,10 @@ def facts(state: TeamState) -> list[str]:
 def summary(state: TeamState) -> str:
     """The paragraph at the top of the report, written by the model from the facts only."""
     # TODO 2.3
-    # your code here
-    raise NotImplementedError
+    lines = "\n".join(facts(state))
+    prompt = REPORT_PROMPT.format(facts=lines)
+    reply = retry(config.chat().invoke, prompt)
+    return text_of(reply).strip()
 
 
 def report(state: TeamState) -> dict:
@@ -138,8 +164,17 @@ def report(state: TeamState) -> dict:
 
 def build_graph():
     # TODO 2.4
-    # your code here
-    raise NotImplementedError
+    builder = StateGraph(TeamState)
+    builder.add_node("triage", triage)
+    builder.add_node("fix", fix)
+    builder.add_node("report", report)
+
+    builder.add_edge(START, "triage")
+    builder.add_conditional_edges("triage", fan_out, ["fix", "report"])
+    builder.add_edge("fix", "report")
+    builder.add_edge("report", END)
+
+    return builder.compile()
 
 
 def run(issues, callbacks=None):
